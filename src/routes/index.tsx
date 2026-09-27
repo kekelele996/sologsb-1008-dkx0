@@ -1,11 +1,18 @@
 import { $, component$, useSignal, useVisibleTask$, type QRL } from "@builder.io/qwik";
 import { type DocumentHead } from "@builder.io/qwik-city";
 import { createSeedProject, STATUS_LABELS, uid } from "../data";
-import type { ReviewStatus, SignItem, SignProject } from "../types";
-import { analyzeSign, cloneTerms, diffText } from "../utils";
+import type { DeliveryFinalization, ReviewStatus, SignItem, SignProject } from "../types";
+import {
+  analyzeSign,
+  cloneTerms,
+  diffText,
+  finalizationDrift,
+  finalizationReadiness,
+} from "../utils";
 
 const STORAGE_KEY = "sologsb-1008-project-v1";
 const WIDTHS = [320, 480, 720, 960] as const;
+const MAX_FINALIZATIONS = 12;
 
 export const head: DocumentHead = {
   title: "公共标识多语言校对台",
@@ -30,6 +37,7 @@ export default component$(() => {
   const previewWidth = useSignal(480);
   const previewFont = useSignal(42);
   const selectedVersionId = useSignal("");
+  const selectedFinalizationId = useSignal("");
   const termSource = useSignal("");
   const termTarget = useSignal("");
   const commentDraft = useSignal("");
@@ -126,6 +134,54 @@ export default component$(() => {
     toast.value = "版本快照已保存";
   });
 
+  const createFinalization = $(() => {
+    const readiness = finalizationReadiness(project.value);
+    if (!readiness.ready) {
+      toast.value = "仍有条目未确认或必选术语未命中，无法生成定稿";
+      return;
+    }
+    const finalizationId = uid("final");
+    commit("生成交付定稿", (draft) => {
+      const record: DeliveryFinalization = {
+        id: finalizationId,
+        createdAt: new Date().toISOString(),
+        projectTitle: draft.title,
+        signs: draft.signs.map((sign) => ({
+          id: sign.id,
+          code: sign.code,
+          status: sign.status,
+          targetLanguage: sign.targetLanguage,
+          targetText: sign.targetText,
+          terms: cloneTerms(sign.terms),
+          comments: structuredClone(sign.comments),
+        })),
+      };
+      draft.finalizations.unshift(record);
+      draft.finalizations = draft.finalizations.slice(0, MAX_FINALIZATIONS);
+    });
+    selectedFinalizationId.value = finalizationId;
+    toast.value = "交付定稿已生成";
+  });
+
+  const restoreFinalization = $((finalizationId: string) => {
+    const record = project.value.finalizations.find((item) => item.id === finalizationId);
+    if (!record) return;
+    commit("恢复历史定稿", (draft) => {
+      draft.title = record.projectTitle;
+      for (const snapshot of record.signs) {
+        const sign = draft.signs.find((item) => item.id === snapshot.id);
+        if (!sign) continue;
+        sign.targetText = snapshot.targetText;
+        sign.targetLanguage = snapshot.targetLanguage;
+        sign.terms = cloneTerms(snapshot.terms);
+        sign.comments = structuredClone(snapshot.comments);
+        sign.status = snapshot.status;
+      }
+    });
+    selectedFinalizationId.value = finalizationId;
+    toast.value = "编辑区已恢复为该定稿内容";
+  });
+
   const addTerm = $(() => {
     const source = termSource.value.trim();
     const target = termTarget.value.trim();
@@ -180,13 +236,29 @@ export default component$(() => {
     const version = selectedVersion();
     return version ? diffText(version.targetText, active().targetText) : [];
   };
+  const readiness = () => finalizationReadiness(project.value);
+  const latestFinalization = () => project.value.finalizations[0];
+  const latestDrifts = () => {
+    const latest = latestFinalization();
+    return latest ? finalizationDrift(project.value, latest) : [];
+  };
+  const latestStale = () => {
+    const latest = latestFinalization();
+    if (!latest) return false;
+    if (project.value.title !== latest.projectTitle) return true;
+    return latestDrifts().some((drift) => drift.stale);
+  };
+  const driftFor = (signId: string) => latestDrifts().find((drift) => drift.signId === signId);
 
   useVisibleTask$(({ track }) => {
     track(() => hydrated.value);
     if (!hydrated.value) {
       try {
         const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "") as { schema: number; project: SignProject };
-        if (stored.schema === 1 && stored.project?.signs?.length) project.value = stored.project;
+        if (stored.schema === 1 && stored.project?.signs?.length) {
+          stored.project.finalizations ??= [];
+          project.value = stored.project;
+        }
         const requestedPreview = new URLSearchParams(window.location.search).get("preview") ?? "";
         previewId.value = requestedPreview;
         readOnly.value = Boolean(requestedPreview);
@@ -248,15 +320,40 @@ export default component$(() => {
   if (readOnly.value) {
     const sign = active();
     const analysis = analyzeSign(sign, previewWidth.value, previewFont.value);
+    const finalization = latestFinalization();
+    const stale = latestStale();
+    const signDriftEntry = driftFor(sign.id);
     return (
       <main data-theme="corporate" class="min-h-screen bg-slate-100 p-6">
         <div class="mx-auto max-w-5xl">
+          {finalization ? (
+            <div class={`alert mb-4 ${stale ? "alert-warning" : "alert-success"}`}>
+              <span class="text-lg">{stale ? "⚠" : "✓"}</span>
+              <div class="text-sm">
+                <strong>{stale ? "交付定稿已过期" : "交付定稿有效"}</strong>
+                <span class="ml-2">
+                  定稿于 {new Date(finalization.createdAt).toLocaleString()}
+                  {stale ? "，标题、译文、术语或审校意见已发生变化，请联系负责人重新定稿。" : "，当前内容与定稿一致。"}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div class="alert mb-4 alert-info">
+              <span class="text-lg">i</span>
+              <span class="text-sm">该项目尚未生成交付定稿，以下为当前本地内容的只读预览。</span>
+            </div>
+          )}
           <div class="mb-4 flex items-center justify-between">
             <div>
               <div class="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Read-only preview</div>
               <h1 class="text-2xl font-bold text-slate-800">{sign.code} · {sign.scenario}</h1>
             </div>
-            <span class={`badge ${statusClass(sign.status)}`}>{STATUS_LABELS[sign.status]}</span>
+            <div class="flex items-center gap-2">
+              {signDriftEntry?.stale && (
+                <span class="badge badge-warning gap-1">定稿已过期 · {signDriftEntry.reasons.join("、")}</span>
+              )}
+              <span class={`badge ${statusClass(sign.status)}`}>{STATUS_LABELS[sign.status]}</span>
+            </div>
           </div>
           <section class="rounded-3xl bg-white p-14 shadow-xl">
             <div class="mb-3 text-center text-xs text-slate-400">中文原文</div>
@@ -295,6 +392,14 @@ export default component$(() => {
           <button class="btn btn-ghost btn-sm" disabled={!past.value.length} onClick$={undo}>撤销</button>
           <button class="btn btn-ghost btn-sm" disabled={!future.value.length} onClick$={redo}>重做</button>
           <button class="btn btn-sm border-white/20 bg-white/10 text-white hover:bg-white/20" onClick$={sharePreview}>复制只读链接</button>
+          <button
+            class={`btn btn-sm ${latestStale() ? "btn-warning" : "btn-accent"}`}
+            disabled={!readiness().ready}
+            title={readiness().ready ? "所有条目已确认且必选术语均已命中" : "仍有条目未确认，或存在未命中的必选术语"}
+            onClick$={createFinalization}
+          >
+            {latestFinalization() ? (latestStale() ? "重新定稿" : "再次定稿") : "生成交付定稿"}
+          </button>
           <button class={`btn btn-sm ${active().emergencyRevision ? "btn-error" : "btn-warning"}`} onClick$={toggleEmergency}>
             {active().emergencyRevision ? "退出紧急修订" : "紧急修订"}
           </button>
@@ -308,16 +413,34 @@ export default component$(() => {
         </div>
       )}
 
+      {latestFinalization() && latestStale() && (
+        <div class="alert alert-warning rounded-none border-x-0 py-2">
+          <span class="text-lg">⚠</span>
+          <span class="text-sm">
+            <strong>交付定稿已过期</strong>（{new Date(latestFinalization()!.createdAt).toLocaleString()}）：定稿之后标题、译文、术语或审校意见发生了变化，需要负责人重新定稿。
+          </span>
+          <button class="btn btn-sm btn-warning" disabled={!readiness().ready} onClick$={createFinalization}>重新定稿</button>
+        </div>
+      )}
+
       <div class="grid min-h-[calc(100vh-64px)] grid-cols-[270px_minmax(560px,1fr)_430px] gap-px bg-slate-300">
         <aside class="overflow-y-auto bg-slate-50 p-3">
           <div class="mb-3 rounded-xl bg-white p-4 shadow-sm">
             <div class="text-xs font-bold uppercase tracking-[0.16em] text-slate-400">标识清单</div>
             <div class="mt-1 text-lg font-bold text-slate-800">{project.value.signs.length} 处标识</div>
             <p class="mt-1 text-xs leading-5 text-slate-500">{project.value.location}</p>
+            {latestFinalization() ? (
+              <div class={`mt-3 rounded-lg px-2 py-1.5 text-[11px] font-semibold ${latestStale() ? "bg-warning/15 text-warning-content" : "bg-success/15 text-success-content"}`}>
+                {latestStale() ? "⚠ 定稿已过期，需重新定稿" : `✓ 定稿有效 · ${new Date(latestFinalization()!.createdAt).toLocaleDateString()}`}
+              </div>
+            ) : (
+              <div class="mt-3 rounded-lg bg-slate-100 px-2 py-1.5 text-[11px] font-semibold text-slate-500">尚未生成交付定稿</div>
+            )}
           </div>
           <div class="space-y-2">
             {project.value.signs.map((sign, index) => {
               const risk = analyzeSign(sign, previewWidth.value, previewFont.value);
+              const drift = driftFor(sign.id);
               return (
                 <button
                   key={sign.id}
@@ -332,6 +455,11 @@ export default component$(() => {
                     <span class={`badge badge-sm ${statusClass(sign.status)}`}>{STATUS_LABELS[sign.status]}</span>
                   </div>
                   <div class="mt-2 line-clamp-2 text-sm font-semibold text-slate-700">{sign.sourceText}</div>
+                  {drift?.stale && (
+                    <div class="mt-2 truncate rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-bold text-warning-content" title={drift.reasons.join("、")}>
+                      ⚠ 定稿已过期 · {drift.reasons.join("、")}
+                    </div>
+                  )}
                   <div class="mt-2 flex items-center justify-between text-[11px] text-slate-500">
                     <span>{sign.targetLanguage}</span>
                     <span class={risk.risk === "high" ? "font-bold text-error" : risk.risk === "medium" ? "font-bold text-warning" : "text-success"}>
@@ -540,6 +668,86 @@ export default component$(() => {
                   </>
                 ) : (
                   <div class="mt-3 rounded-xl border border-dashed p-5 text-center text-xs text-slate-400">保存当前译文后会在这里生成可比较版本。</div>
+                )}
+              </div>
+            </div>
+
+            <div class="card border border-slate-200 bg-white shadow-sm">
+              <div class="card-body p-4">
+                <div class="flex items-center justify-between">
+                  <div>
+                    <div class="text-xs font-bold uppercase tracking-[0.16em] text-slate-400">Delivery</div>
+                    <h2 class="font-bold">交付定稿</h2>
+                  </div>
+                  {latestFinalization() ? (
+                    <span class={`badge ${latestStale() ? "badge-warning" : "badge-success"}`}>
+                      {latestStale() ? "已过期" : "有效"}
+                    </span>
+                  ) : (
+                    <span class="badge badge-ghost">未定稿</span>
+                  )}
+                </div>
+                <p class="mt-1 text-xs text-slate-500">全部条目已确认、必选术语全部命中后，可固定标题、译文、术语与审校意见。</p>
+
+                {readiness().ready ? (
+                  <div class="alert alert-success mt-3 py-2 text-xs">✓ 全部 {project.value.signs.length} 条标识已确认，必选术语均已命中，可以交付定稿。</div>
+                ) : (
+                  <div class="alert alert-warning mt-3 py-2 text-xs">
+                    <div>
+                      <div>以下条目未满足定稿条件：</div>
+                      <ul class="mt-1 list-disc pl-4">
+                        {readiness().blockedSigns.map(({ sign, missingTerms }) => (
+                          <li key={sign.id}>
+                            {sign.code}
+                            {sign.status !== "confirmed" && ` · 状态为「${STATUS_LABELS[sign.status]}」`}
+                            {missingTerms.length > 0 && ` · 未命中必选术语：${missingTerms.map((term) => term.target).join("、")}`}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                )}
+
+                <button class="btn btn-sm btn-accent mt-3 w-full" disabled={!readiness().ready} onClick$={createFinalization}>
+                  {latestFinalization() ? (latestStale() ? "重新定稿" : "再次定稿") : "生成交付定稿"}
+                </button>
+
+                {latestFinalization() && (
+                  <>
+                    {latestStale() && (
+                      <div class="mt-3 rounded-lg bg-warning/15 p-2 text-[11px] font-semibold text-warning-content">
+                        最新定稿（{new Date(latestFinalization()!.createdAt).toLocaleString()}）已过期：
+                        <ul class="mt-1 list-disc pl-4 font-normal">
+                          {project.value.title !== latestFinalization()!.projectTitle && <li>项目标题已修改</li>}
+                          {latestDrifts().filter((drift) => drift.stale).map((drift) => {
+                            const sign = project.value.signs.find((item) => item.id === drift.signId);
+                            return <li key={drift.signId}>{sign?.code} · {drift.reasons.join("、")}</li>;
+                          })}
+                        </ul>
+                      </div>
+                    )}
+                    <div class="mt-3">
+                      <div class="mb-1 text-[11px] font-bold uppercase tracking-wide text-slate-400">历史定稿（最多 {MAX_FINALIZATIONS} 份）</div>
+                      <ul class="space-y-1.5">
+                        {project.value.finalizations.map((record) => {
+                          const recordStale =
+                            project.value.title !== record.projectTitle ||
+                            finalizationDrift(project.value, record).some((drift) => drift.stale);
+                          return (
+                            <li key={record.id} class={`flex items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 ${selectedFinalizationId.value === record.id ? "border-accent bg-accent/5" : "border-slate-200"}`}>
+                              <div class="min-w-0">
+                                <div class="truncate text-xs font-semibold">{new Date(record.createdAt).toLocaleString()}</div>
+                                <div class={`truncate text-[10px] ${recordStale ? "font-bold text-warning-content" : "text-slate-400"}`}>
+                                  {recordStale ? "⚠ 已过期" : "✓ 与当前内容一致"}
+                                </div>
+                              </div>
+                              <button class="btn btn-xs btn-ghost" onClick$={() => restoreFinalization(record.id)}>恢复到编辑区</button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  </>
                 )}
               </div>
             </div>

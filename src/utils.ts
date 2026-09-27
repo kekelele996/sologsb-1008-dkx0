@@ -1,4 +1,23 @@
-import type { DiffToken, SignItem, TermBinding } from "./types";
+import type {
+  DeliveryFinalization,
+  DiffToken,
+  FinalizedSign,
+  SignItem,
+  SignProject,
+  TermBinding,
+} from "./types";
+
+export interface SignDrift {
+  signId: string;
+  stale: boolean;
+  reasons: string[];
+}
+
+export interface FinalizationReadiness {
+  ready: boolean;
+  missingCount: number;
+  blockedSigns: { sign: SignItem; missingTerms: TermBinding[] }[];
+}
 
 export function estimatedLines(text: string, width: number, fontSize: number, lineHeight = 1.25) {
   if (!text.trim()) return [];
@@ -103,4 +122,41 @@ export function diffText(oldText: string, newText: string): DiffToken[] {
 
 export function cloneTerms(terms: TermBinding[]) {
   return structuredClone(terms);
+}
+
+export function missingRequiredTerms(sign: SignItem): TermBinding[] {
+  return sign.terms.filter(
+    (term) => term.required && !sign.targetText.toLocaleLowerCase().includes(term.target.toLocaleLowerCase()),
+  );
+}
+
+export function finalizationReadiness(project: SignProject): FinalizationReadiness {
+  const blockedSigns = project.signs.flatMap((sign) => {
+    const missingTerms = missingRequiredTerms(sign);
+    return sign.status === "confirmed" && missingTerms.length === 0
+      ? []
+      : [{ sign, missingTerms }];
+  });
+  const missingCount = blockedSigns.length
+    ? blockedSigns.reduce((total, entry) => total + Math.max(1, entry.missingTerms.length), 0)
+    : 0;
+  return { ready: project.signs.length > 0 && blockedSigns.length === 0, missingCount, blockedSigns };
+}
+
+export function signDrift(sign: SignItem, snapshot: FinalizedSign | undefined): SignDrift {
+  if (!snapshot) {
+    return { signId: sign.id, stale: true, reasons: ["定稿中缺少该标识"] };
+  }
+  const reasons: string[] = [];
+  if (sign.targetText !== snapshot.targetText) reasons.push("译文已修改");
+  if (sign.status !== snapshot.status) reasons.push("审校状态已变更");
+  if (JSON.stringify(sign.terms) !== JSON.stringify(snapshot.terms)) reasons.push("术语已变更或撤下");
+  if (JSON.stringify(sign.comments) !== JSON.stringify(snapshot.comments)) reasons.push("审校意见已变更");
+  return { signId: sign.id, stale: reasons.length > 0, reasons };
+}
+
+export function finalizationDrift(project: SignProject, finalization: DeliveryFinalization): SignDrift[] {
+  return project.signs.map((sign) =>
+    signDrift(sign, finalization.signs.find((item) => item.id === sign.id)),
+  );
 }

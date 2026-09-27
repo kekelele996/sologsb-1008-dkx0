@@ -34,6 +34,23 @@ export interface VersionSnapshot {
   terms: TermBinding[];
 }
 
+export interface FinalizedSign {
+  id: string;
+  code: string;
+  status: ReviewStatus;
+  targetLanguage: string;
+  targetText: string;
+  terms: TermBinding[];
+  comments: ReviewComment[];
+}
+
+export interface DeliveryFinalization {
+  id: string;
+  createdAt: string;
+  projectTitle: string;
+  signs: FinalizedSign[];
+}
+
 export interface SignItem {
   id: string;
   code: string;
@@ -56,6 +73,7 @@ export interface SignProject {
   location: string;
   activeSignId: string;
   signs: SignItem[];
+  finalizations: DeliveryFinalization[];
   updatedAt: string;
 }
 
