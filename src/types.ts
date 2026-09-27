@@ -50,13 +50,49 @@ export interface SignItem {
   updatedAt: string;
 }
 
+export interface DeliveredSign {
+  id: string;
+  code: string;
+  sourceText: string;
+  targetLanguage: string;
+  targetText: string;
+  scenario: string;
+  regulation: string;
+  status: ReviewStatus;
+  terms: TermBinding[];
+  comments: ReviewComment[];
+}
+
+export interface DeliverySnapshot {
+  id: string;
+  createdAt: string;
+  projectTitle: string;
+  location: string;
+  signs: DeliveredSign[];
+}
+
 export interface SignProject {
   id: string;
   title: string;
   location: string;
   activeSignId: string;
   signs: SignItem[];
+  deliveries: DeliverySnapshot[];
   updatedAt: string;
+}
+
+export interface DeliveryState {
+  has: boolean;
+  stale: boolean;
+  staleSignIds: string[];
+  perSign: Record<string, string[]>;
+  reasons: string[];
+}
+
+export interface DeliveryReadiness {
+  canDeliver: boolean;
+  unconfirmed: SignItem[];
+  missingTerms: { sign: SignItem; terms: TermBinding[] }[];
 }
 
 export interface PersistedProject {

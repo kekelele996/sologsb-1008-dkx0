@@ -88,6 +88,7 @@ export const createSeedProject = (): SignProject => {
     location: "滨海交通枢纽一期",
     activeSignId: signs[0].id,
     signs,
+    deliveries: [],
     updatedAt: new Date().toISOString(),
   };
 };

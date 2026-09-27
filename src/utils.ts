@@ -1,4 +1,12 @@
-import type { DiffToken, SignItem, TermBinding } from "./types";
+import type {
+  DeliveryReadiness,
+  DeliverySnapshot,
+  DeliveryState,
+  DiffToken,
+  SignItem,
+  SignProject,
+  TermBinding,
+} from "./types";
 
 export function estimatedLines(text: string, width: number, fontSize: number, lineHeight = 1.25) {
   if (!text.trim()) return [];
@@ -103,4 +111,44 @@ export function diffText(oldText: string, newText: string): DiffToken[] {
 
 export function cloneTerms(terms: TermBinding[]) {
   return structuredClone(terms);
+}
+
+export function termHit(text: string, term: TermBinding) {
+  return text.toLocaleLowerCase().includes(term.target.toLocaleLowerCase());
+}
+
+export function missingRequiredTerms(sign: SignItem) {
+  return sign.terms.filter((term) => term.required && !termHit(sign.targetText, term));
+}
+
+export function checkDeliveryReadiness(project: SignProject): DeliveryReadiness {
+  const unconfirmed = project.signs.filter((sign) => sign.status !== "confirmed");
+  const missingTerms = project.signs
+    .map((sign) => ({ sign, terms: missingRequiredTerms(sign) }))
+    .filter((entry) => entry.terms.length > 0);
+  return { canDeliver: unconfirmed.length === 0 && missingTerms.length === 0, unconfirmed, missingTerms };
+}
+
+export function evaluateDelivery(project: SignProject): DeliveryState {
+  const latest = project.deliveries[0];
+  if (!latest) return { has: false, stale: false, staleSignIds: [], perSign: {}, reasons: [] };
+  const perSign: Record<string, string[]> = {};
+  const reasons: string[] = [];
+  for (const delivered of latest.signs) {
+    const current = project.signs.find((sign) => sign.id === delivered.id);
+    const signReasons: string[] = [];
+    if (!current) {
+      signReasons.push("标识条目已被删除");
+    } else {
+      if (current.targetText !== delivered.targetText) signReasons.push("译文已修改");
+      for (const deliveredTerm of delivered.terms) {
+        const currentTerm = current.terms.find((term) => term.id === deliveredTerm.id);
+        if (!currentTerm) signReasons.push(`术语「${deliveredTerm.source}」已撤下`);
+      }
+    }
+    if (signReasons.length) perSign[delivered.id] = signReasons;
+    for (const reason of signReasons) reasons.push(`${delivered.code} ${reason}`);
+  }
+  const staleSignIds = Object.keys(perSign);
+  return { has: true, stale: staleSignIds.length > 0, staleSignIds, perSign, reasons };
 }

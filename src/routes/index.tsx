@@ -1,8 +1,8 @@
 import { $, component$, useSignal, useVisibleTask$, type QRL } from "@builder.io/qwik";
 import { type DocumentHead } from "@builder.io/qwik-city";
 import { createSeedProject, STATUS_LABELS, uid } from "../data";
-import type { ReviewStatus, SignItem, SignProject } from "../types";
-import { analyzeSign, cloneTerms, diffText } from "../utils";
+import type { DeliverySnapshot, ReviewStatus, SignItem, SignProject } from "../types";
+import { analyzeSign, checkDeliveryReadiness, cloneTerms, diffText, evaluateDelivery } from "../utils";
 
 const STORAGE_KEY = "sologsb-1008-project-v1";
 const WIDTHS = [320, 480, 720, 960] as const;
@@ -181,12 +181,60 @@ export default component$(() => {
     return version ? diffText(version.targetText, active().targetText) : [];
   };
 
+  const createDelivery = $(() => {
+    if (!checkDeliveryReadiness(project.value).canDeliver) {
+      toast.value = "尚有未确认条目或未命中必选术语，无法定稿";
+      return;
+    }
+    const snapshot: DeliverySnapshot = {
+      id: uid("delivery"),
+      createdAt: new Date().toISOString(),
+      projectTitle: project.value.title,
+      location: project.value.location,
+      signs: project.value.signs.map((sign) => ({
+        id: sign.id,
+        code: sign.code,
+        sourceText: sign.sourceText,
+        targetLanguage: sign.targetLanguage,
+        targetText: sign.targetText,
+        scenario: sign.scenario,
+        regulation: sign.regulation,
+        status: sign.status,
+        terms: cloneTerms(sign.terms),
+        comments: structuredClone(sign.comments),
+      })),
+    };
+    commit("生成交付定稿", (draft) => {
+      draft.deliveries.unshift(snapshot);
+    });
+    toast.value = "交付定稿已生成，标题、译文、术语与审校意见已固定";
+  });
+
+  const restoreDelivery = $((deliveryId: string) => {
+    const snapshot = project.value.deliveries.find((item) => item.id === deliveryId);
+    if (!snapshot) return;
+    commit("恢复历史定稿", (draft) => {
+      draft.title = snapshot.projectTitle;
+      for (const delivered of snapshot.signs) {
+        const sign = draft.signs.find((item) => item.id === delivered.id);
+        if (!sign) continue;
+        sign.targetText = delivered.targetText;
+        sign.comments = structuredClone(delivered.comments);
+      }
+    });
+    selectedVersionId.value = "";
+    toast.value = "编辑区已恢复为该定稿保存的标题、译文与审校意见";
+  });
+
   useVisibleTask$(({ track }) => {
     track(() => hydrated.value);
     if (!hydrated.value) {
       try {
         const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "") as { schema: number; project: SignProject };
-        if (stored.schema === 1 && stored.project?.signs?.length) project.value = stored.project;
+        if (stored.schema === 1 && stored.project?.signs?.length) {
+          stored.project.deliveries ??= [];
+          project.value = stored.project;
+        }
         const requestedPreview = new URLSearchParams(window.location.search).get("preview") ?? "";
         previewId.value = requestedPreview;
         readOnly.value = Boolean(requestedPreview);
@@ -245,9 +293,15 @@ export default component$(() => {
     });
   });
 
+  const delivery = () => evaluateDelivery(project.value);
+  const readiness = () => checkDeliveryReadiness(project.value);
+
   if (readOnly.value) {
     const sign = active();
     const analysis = analyzeSign(sign, previewWidth.value, previewFont.value);
+    const deliveryState = delivery();
+    const signDeliveryReasons = deliveryState.perSign[sign.id] ?? [];
+    const latestDelivery = project.value.deliveries[0];
     return (
       <main data-theme="corporate" class="min-h-screen bg-slate-100 p-6">
         <div class="mx-auto max-w-5xl">
@@ -258,6 +312,31 @@ export default component$(() => {
             </div>
             <span class={`badge ${statusClass(sign.status)}`}>{STATUS_LABELS[sign.status]}</span>
           </div>
+          {deliveryState.stale && (
+            <div class="alert alert-error mt-4 text-sm">
+              <span class="text-lg">!</span>
+              <div>
+                <strong>交付定稿已过期，需要重新定稿。</strong>
+                <span class="ml-1">定稿时间 {new Date(latestDelivery.createdAt).toLocaleString()}。</span>
+                {signDeliveryReasons.length > 0 && <div class="mt-0.5 text-xs">当前标识：{signDeliveryReasons.join("；")}</div>}
+              </div>
+            </div>
+          )}
+          {deliveryState.has && !deliveryState.stale && (
+            <div class="alert alert-success mt-4 text-sm">
+              <span class="text-lg">✓</span>
+              <div>
+                <strong>当前内容与交付定稿一致。</strong>
+                <span class="ml-1">定稿时间 {new Date(latestDelivery.createdAt).toLocaleString()}。</span>
+              </div>
+            </div>
+          )}
+          {!deliveryState.has && (
+            <div class="alert alert-warning mt-4 text-sm">
+              <span class="text-lg">?</span>
+              <span>项目尚未生成交付定稿，本预览仅展示当前浏览器中的草稿内容。</span>
+            </div>
+          )}
           <section class="rounded-3xl bg-white p-14 shadow-xl">
             <div class="mb-3 text-center text-xs text-slate-400">中文原文</div>
             <p class="mx-auto mb-10 max-w-2xl text-center text-lg text-slate-600">{sign.sourceText}</p>
@@ -308,12 +387,76 @@ export default component$(() => {
         </div>
       )}
 
+      {delivery().stale && (
+        <div class="alert alert-error rounded-none border-x-0 border-t-0 py-2">
+          <span class="text-lg">!</span>
+          <div class="min-w-0">
+            <strong>交付定稿已过期，需要重新定稿。</strong>
+            <span class="ml-1 text-xs">定稿于 {new Date(project.value.deliveries[0]!.createdAt).toLocaleString()}；{delivery().reasons.slice(0, 3).join("；")}{delivery().reasons.length > 3 ? ` 等 ${delivery().reasons.length} 项` : ""}</span>
+          </div>
+        </div>
+      )}
+
       <div class="grid min-h-[calc(100vh-64px)] grid-cols-[270px_minmax(560px,1fr)_430px] gap-px bg-slate-300">
         <aside class="overflow-y-auto bg-slate-50 p-3">
           <div class="mb-3 rounded-xl bg-white p-4 shadow-sm">
             <div class="text-xs font-bold uppercase tracking-[0.16em] text-slate-400">标识清单</div>
             <div class="mt-1 text-lg font-bold text-slate-800">{project.value.signs.length} 处标识</div>
             <p class="mt-1 text-xs leading-5 text-slate-500">{project.value.location}</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div class="flex items-center justify-between">
+              <div class="text-xs font-bold uppercase tracking-[0.16em] text-slate-400">Delivery</div>
+              {delivery().has && (
+                <span class={`badge badge-sm ${delivery().stale ? "badge-error" : "badge-success"}`}>
+                  {delivery().stale ? "定稿已过期" : "已定稿"}
+                </span>
+              )}
+            </div>
+            {delivery().has ? (
+              <div class="mt-2">
+                <div class="text-sm font-bold text-slate-700">{project.value.deliveries.length} 次定稿</div>
+                <div class="mt-0.5 text-xs text-slate-500">最近：{new Date(project.value.deliveries[0].createdAt).toLocaleString()}</div>
+                {delivery().stale && (
+                  <p class="mt-2 rounded-lg bg-error/10 p-2 text-[11px] leading-4 text-error">
+                    译文或术语在定稿后发生变化，标识清单已标记，请重新定稿。
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p class="mt-2 text-xs leading-4 text-slate-500">所有条目确认且必选术语命中后，可生成一次交付定稿。</p>
+            )}
+            <button
+              class="btn btn-primary btn-sm mt-3 w-full"
+              disabled={!readiness().canDeliver}
+              title={readiness().canDeliver ? "" : "需要全部条目已确认且必选术语全部命中"}
+              onClick$={createDelivery}
+            >
+              {delivery().stale ? "重新定稿" : "生成交付定稿"}
+            </button>
+            {!readiness().canDeliver && (
+              <ul class="mt-2 space-y-1 text-[11px] leading-4 text-slate-500">
+                {readiness().unconfirmed.slice(0, 3).map((sign) => <li>· {sign.code} 尚未确认</li>)}
+                {readiness().missingTerms.map(({ sign, terms }) => (
+                  <li key={sign.id}>· {sign.code} 缺术语：{terms.map((term) => term.target).join("、")}</li>
+                ))}
+              </ul>
+            )}
+            {project.value.deliveries.length > 0 && (
+              <div class="mt-3 border-t border-slate-100 pt-2">
+                <div class="mb-1 text-[11px] font-bold text-slate-400">历史定稿</div>
+                <div class="max-h-32 space-y-1 overflow-y-auto">
+                  {project.value.deliveries.map((item, index) => (
+                    <div key={item.id} class="flex items-center justify-between gap-1 rounded-lg bg-slate-50 px-2 py-1 text-[11px]">
+                      <span class="min-w-0 truncate" title={item.projectTitle}>
+                        第 {project.value.deliveries.length - index} 次 · {new Date(item.createdAt).toLocaleString()}
+                      </span>
+                      <button class="btn btn-xs btn-ghost shrink-0" onClick$={() => restoreDelivery(item.id)}>恢复</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
           <div class="space-y-2">
             {project.value.signs.map((sign, index) => {
@@ -338,6 +481,11 @@ export default component$(() => {
                       {risk.risk === "high" ? "高风险" : risk.risk === "medium" ? "需留意" : "版面正常"}
                     </span>
                   </div>
+                  {delivery().perSign[sign.id] && (
+                    <div class="mt-2 rounded-md bg-error/10 px-2 py-1 text-[11px] font-bold leading-4 text-error">
+                      定稿已过期：{delivery().perSign[sign.id].join("；")}
+                    </div>
+                  )}
                   <span class="sr-only">第 {index + 1} 条</span>
                 </button>
               );
